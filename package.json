@@ -1,0 +1,12 @@
+{
+  "name": "tabby-start-buttons",
+  "version": "0.1.2",
+  "description": "\u8d77\u59cb\u9875\u542f\u52a8\u6309\u94ae (Codex CLI / Claude Code)",
+  "keywords": [
+    "tabby-plugin"
+  ],
+  "main": "dist/index.js",
+  "type": "commonjs",
+  "author": "tangdan01",
+  "license": "MIT"
+}
