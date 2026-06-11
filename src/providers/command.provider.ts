@@ -208,6 +208,8 @@ export class AgentMuxCommandProvider extends CommandProvider {
 
   private patchRightClickPaste(): void {
     let lastRightClickTime = 0
+    let lastPasteContent = ''
+    let lastPasteTime = 0
 
     document.addEventListener('mousedown', (e: MouseEvent) => {
       if (e.button === 2) lastRightClickTime = Date.now()
@@ -225,7 +227,56 @@ export class AgentMuxCommandProvider extends CommandProvider {
       }
     }, true)
 
-    log('patchRightClickPaste: xterm double-paste guard active')
+    const patchSessionWrite = (tab: any) => {
+      if (!tab?.session?.write || tab.session.__pasteGuardPatched) return
+      const originalWrite = tab.session.write.bind(tab.session)
+      tab.session.__pasteGuardPatched = true
+      tab.session.write = (data: any) => {
+        const now = Date.now()
+        const text = typeof data === 'string' ? data : data?.toString?.() || ''
+        if (
+          now - lastRightClickTime < 300 &&
+          text.length > 1 &&
+          text === lastPasteContent &&
+          now - lastPasteTime < 150
+        ) {
+          log('patchRightClickPaste: blocked duplicate write')
+          return
+        }
+        if (now - lastRightClickTime < 300 && text.length > 1) {
+          lastPasteContent = text
+          lastPasteTime = now
+        }
+        originalWrite(data)
+      }
+    }
+
+    const tryPatchActive = () => {
+      const tab = (this.appService as any).activeTab
+      if (tab?.session) patchSessionWrite(tab)
+    }
+
+    if ((this.appService as any).activeTabChange$?.subscribe) {
+      this.subscriptions.push(
+        (this.appService as any).activeTabChange$.subscribe(() => {
+          setTimeout(tryPatchActive, 100)
+        })
+      )
+    }
+    if ((this.appService as any).tabOpened$?.subscribe) {
+      this.subscriptions.push(
+        (this.appService as any).tabOpened$.subscribe((tab: any) => {
+          const waitSession = () => {
+            if (tab?.session) patchSessionWrite(tab)
+            else if (!tab?.destroyed) setTimeout(waitSession, 300)
+          }
+          setTimeout(waitSession, 200)
+        })
+      )
+    }
+    setTimeout(tryPatchActive, 500)
+
+    log('patchRightClickPaste: session-level dedup guard active')
   }
 
   async provide(): Promise<any[]> {
