@@ -27,7 +27,11 @@ function ensureHistoryDir(): void {
 
 function loadHistory(): any[] {
   try {
-    if (fs.existsSync(HISTORY_FILE)) return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'))
+    if (fs.existsSync(HISTORY_FILE)) {
+      const data = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf-8'))
+      if (!Array.isArray(data)) return []
+      return data.filter((item: any) => item && typeof item.kind === 'string' && typeof item.cwd === 'string')
+    }
   } catch {}
   return []
 }
@@ -46,6 +50,8 @@ function saveHistoryAsync(kind: string, cwd: string): void {
 @Injectable()
 export class AgentMuxCommandProvider extends CommandProvider {
   private lastProjectCwd: string
+  private initialized = false
+  private destroyed = false
 
   private notificationGlow: NotificationGlow
   private sidebarPanel: SidebarPanel
@@ -54,9 +60,11 @@ export class AgentMuxCommandProvider extends CommandProvider {
   private browserPanel: BrowserPanel
   private processKeepAlive: ProcessKeepAlive
 
-  private subscriptions: Subscription[] = []
+  private alive = new Subscription()
   private monitoredTabs = new WeakSet<any>()
+  private patchedSessions = new WeakSet<any>()
   private layoutHandler: ((e: Event) => void) | null = null
+  private beforeUnloadHandler: (() => void) | null = null
 
   constructor(
     private profilesService: ProfilesService,
@@ -90,28 +98,60 @@ export class AgentMuxCommandProvider extends CommandProvider {
 
   private deferredInit(): void {
     setTimeout(() => {
+      if (this.destroyed || this.initialized) return
+      this.initialized = true
       this.initAll()
       this.bindHotkeys()
       this.bindLayoutCoordination()
       this.monitorAllTabs()
       this.patchRightClickPaste()
+      log('deferredInit complete')
     }, 0)
   }
 
   private initAll(): void {
-    try { this.notificationGlow.init() } catch (e: any) { logError('NotificationGlow.init', e) }
-    try { this.sidebarPanel.init() } catch (e: any) { logError('SidebarPanel.init', e) }
-    try { this.welcomeButtons.init() } catch (e: any) { logError('WelcomeButtons.init', e) }
-    try { this.tabProtection.init() } catch (e: any) { logError('TabProtection.init', e) }
-    try { this.browserPanel.init() } catch (e: any) { logError('BrowserPanel.init', e) }
+    const safeInit = (name: string, fn: () => void) => {
+      try { fn() } catch (e: any) { logError(`${name}.init`, e) }
+    }
+    safeInit('NotificationGlow', () => this.notificationGlow.init())
+    safeInit('SidebarPanel', () => this.sidebarPanel.init())
+    safeInit('WelcomeButtons', () => this.welcomeButtons.init())
+    safeInit('TabProtection', () => this.tabProtection.init())
+    safeInit('BrowserPanel', () => this.browserPanel.init())
     this.autoRestoreIfNeeded()
+  }
+
+  destroy(): void {
+    if (this.destroyed) return
+    this.destroyed = true
+
+    this.alive.unsubscribe()
+
+    if (this.layoutHandler) {
+      window.removeEventListener('agent-mux-layout-change', this.layoutHandler)
+      this.layoutHandler = null
+    }
+    if (this.beforeUnloadHandler) {
+      window.removeEventListener('beforeunload', this.beforeUnloadHandler)
+      this.beforeUnloadHandler = null
+    }
+
+    try { this.notificationGlow.destroy() } catch {}
+    try { this.sidebarPanel.destroy() } catch {}
+    try { this.welcomeButtons.destroy() } catch {}
+    try { this.tabProtection.destroy() } catch {}
+    try { this.browserPanel.destroy() } catch {}
+    try { this.processKeepAlive.destroy() } catch {}
+    try { this.tabMetadata.destroy() } catch {}
+
+    log('AgentMuxCommandProvider destroyed')
   }
 
   private bindHotkeys(): void {
     try {
       const hotkeys = (this.appService as any).hotkeys
       if (!hotkeys?.hotkey$?.subscribe) return
-      const sub = hotkeys.hotkey$.subscribe((id: string) => {
+      this.alive.add(hotkeys.hotkey$.subscribe((id: string) => {
         switch (id) {
           case 'agent-mux:jump-unread':
             this.notificationGlow.jumpToUnread()
@@ -123,8 +163,7 @@ export class AgentMuxCommandProvider extends CommandProvider {
             this.sidebarPanel.toggle()
             break
         }
-      })
-      this.subscriptions.push(sub)
+      }))
     } catch {}
   }
 
@@ -142,22 +181,21 @@ export class AgentMuxCommandProvider extends CommandProvider {
   }
 
   private monitorAllTabs(): void {
-    const tabSubs = new WeakMap<any, Subscription[]>()
+    const tabSubs = new WeakMap<any, Subscription>()
 
     const attachMonitor = (tab: any) => {
       if (!tab || this.monitoredTabs.has(tab)) return
       this.monitoredTabs.add(tab)
-      const perTab: Subscription[] = []
+      const perTab = new Subscription()
       tabSubs.set(tab, perTab)
 
       const tryAttachOutput = () => {
         if (tab.destroyed) return
         if (tab.session?.output$?.subscribe) {
-          const sub = tab.session.output$.subscribe((data: any) => {
+          perTab.add(tab.session.output$.subscribe((data: any) => {
             const text = typeof data === 'string' ? data : data?.toString?.() || ''
             if (text) this.agentMonitor.updateOutput(tab, text)
-          })
-          perTab.push(sub)
+          }))
           this.tabMetadata.track(tab)
         }
       }
@@ -173,15 +211,11 @@ export class AgentMuxCommandProvider extends CommandProvider {
       }
 
       if (tab.destroyed$?.subscribe) {
-        const sub = tab.destroyed$.subscribe(() => {
+        perTab.add(tab.destroyed$.subscribe(() => {
           this.agentMonitor.removeTab(tab)
-          const subs = tabSubs.get(tab)
-          if (subs) {
-            for (const s of subs) { try { s.unsubscribe() } catch {} }
-            tabSubs.delete(tab)
-          }
-        })
-        perTab.push(sub)
+          const sub = tabSubs.get(tab)
+          if (sub) { sub.unsubscribe(); tabSubs.delete(tab) }
+        }))
       }
     }
 
@@ -189,18 +223,16 @@ export class AgentMuxCommandProvider extends CommandProvider {
     for (const tab of existingTabs) attachMonitor(tab)
 
     if ((this.appService as any).tabOpened$?.subscribe) {
-      const sub = (this.appService as any).tabOpened$.subscribe((tab: any) => {
+      this.alive.add((this.appService as any).tabOpened$.subscribe((tab: any) => {
         attachMonitor(tab)
-      })
-      this.subscriptions.push(sub)
+      }))
     }
 
     if ((this.appService as any).tabsChanged$?.subscribe) {
-      const sub = (this.appService as any).tabsChanged$.subscribe(() => {
+      this.alive.add((this.appService as any).tabsChanged$.subscribe(() => {
         const tabs = (this.appService as any).tabs || []
         for (const tab of tabs) attachMonitor(tab)
-      })
-      this.subscriptions.push(sub)
+      }))
     }
 
     log('monitorAllTabs: auto-monitoring enabled')
@@ -211,11 +243,10 @@ export class AgentMuxCommandProvider extends CommandProvider {
     let lastPasteContent = ''
     let lastPasteTime = 0
 
-    document.addEventListener('mousedown', (e: MouseEvent) => {
+    const onMouseDown = (e: MouseEvent) => {
       if (e.button === 2) lastRightClickTime = Date.now()
-    }, true)
-
-    document.addEventListener('paste', (e: ClipboardEvent) => {
+    }
+    const onPaste = (e: ClipboardEvent) => {
       const elapsed = Date.now() - lastRightClickTime
       if (elapsed < 100) {
         const target = e.target as HTMLElement
@@ -225,13 +256,20 @@ export class AgentMuxCommandProvider extends CommandProvider {
           e.stopImmediatePropagation()
         }
       }
-    }, true)
+    }
 
-    const patchSessionWrite = (tab: any) => {
-      if (!tab?.session?.write || tab.session.__pasteGuardPatched) return
-      const originalWrite = tab.session.write.bind(tab.session)
-      tab.session.__pasteGuardPatched = true
-      tab.session.write = (data: any) => {
+    document.addEventListener('mousedown', onMouseDown, true)
+    document.addEventListener('paste', onPaste, true)
+    this.alive.add(new Subscription(() => {
+      document.removeEventListener('mousedown', onMouseDown, true)
+      document.removeEventListener('paste', onPaste, true)
+    }))
+
+    const patchSessionWrite = (session: any) => {
+      if (!session?.write || this.patchedSessions.has(session)) return
+      this.patchedSessions.add(session)
+      const originalWrite = session.write.bind(session)
+      session.write = (data: any) => {
         const now = Date.now()
         const text = typeof data === 'string' ? data : data?.toString?.() || ''
         if (
@@ -251,29 +289,28 @@ export class AgentMuxCommandProvider extends CommandProvider {
       }
     }
 
+    const tryPatchTab = (tab: any) => {
+      if (tab?.session) patchSessionWrite(tab.session)
+    }
+
     const tryPatchActive = () => {
-      const tab = (this.appService as any).activeTab
-      if (tab?.session) patchSessionWrite(tab)
+      tryPatchTab((this.appService as any).activeTab)
     }
 
     if ((this.appService as any).activeTabChange$?.subscribe) {
-      this.subscriptions.push(
-        (this.appService as any).activeTabChange$.subscribe(() => {
-          setTimeout(tryPatchActive, 100)
-        })
-      )
+      this.alive.add((this.appService as any).activeTabChange$.subscribe(() => {
+        setTimeout(tryPatchActive, 100)
+      }))
     }
     if ((this.appService as any).tabOpened$?.subscribe) {
-      this.subscriptions.push(
-        (this.appService as any).tabOpened$.subscribe((tab: any) => {
-          let waitRetries = 0
-          const waitSession = () => {
-            if (tab?.session) patchSessionWrite(tab)
-            else if (!tab?.destroyed && ++waitRetries < 15) setTimeout(waitSession, 300)
-          }
-          setTimeout(waitSession, 200)
-        })
-      )
+      this.alive.add((this.appService as any).tabOpened$.subscribe((tab: any) => {
+        let waitRetries = 0
+        const waitSession = () => {
+          if (tab?.session) patchSessionWrite(tab.session)
+          else if (!tab?.destroyed && ++waitRetries < 15) setTimeout(waitSession, 300)
+        }
+        setTimeout(waitSession, 200)
+      }))
     }
     setTimeout(tryPatchActive, 500)
 
@@ -360,6 +397,7 @@ export class AgentMuxCommandProvider extends CommandProvider {
   }
 
   async launch(profile: any): Promise<any> {
+    if (this.destroyed) return null
     try {
       log('launch: ' + profile.name)
       const tab = await this.profilesService.openNewTabForProfile(profile)
@@ -406,7 +444,7 @@ export class AgentMuxCommandProvider extends CommandProvider {
       }
 
       if (tab.destroyed$?.subscribe) {
-        const sub = tab.destroyed$.subscribe(() => {
+        tab.destroyed$.subscribe(() => {
           clearInterval(titleInterval)
           if (profileKind) {
             this.processKeepAlive.unwatch(tab)
@@ -414,7 +452,6 @@ export class AgentMuxCommandProvider extends CommandProvider {
             this.sessionPersist.remove(profileKind, cwd)
           }
         })
-        this.subscriptions.push(sub)
       }
 
       log(`Tab launched: ${title}`)
@@ -529,6 +566,7 @@ export class AgentMuxCommandProvider extends CommandProvider {
     }
     let restored = 0
     for (const s of sessions) {
+      if (this.destroyed) break
       const scrollback = this.scrollbackCache.recover(s.kind, s.cwd)
       const tab = await this.launchInDirAndReturn(s.kind, s.cwd)
       if (tab && scrollback) {
@@ -590,7 +628,9 @@ export class AgentMuxCommandProvider extends CommandProvider {
           const text = typeof data === 'string' ? data : data?.toString?.() || ''
           if (text) this.scrollbackCache.append(kind, cwd, text)
         })
-        this.subscriptions.push(sub)
+        if (tab.destroyed$?.subscribe) {
+          tab.destroyed$.subscribe(() => { try { sub.unsubscribe() } catch {} })
+        }
       } else {
         setTimeout(waitForSession, 500)
       }
@@ -603,9 +643,10 @@ export class AgentMuxCommandProvider extends CommandProvider {
     const wasCleanShutdown = localStorage.getItem(SHUTDOWN_KEY) === 'true'
     localStorage.removeItem(SHUTDOWN_KEY)
 
-    window.addEventListener('beforeunload', () => {
+    this.beforeUnloadHandler = () => {
       localStorage.setItem(SHUTDOWN_KEY, 'true')
-    })
+    }
+    window.addEventListener('beforeunload', this.beforeUnloadHandler)
 
     if (wasCleanShutdown) {
       this.sessionPersist.clear()
@@ -617,6 +658,7 @@ export class AgentMuxCommandProvider extends CommandProvider {
 
     log(`autoRestore: crash recovery - found ${sessions.length} sessions`)
     setTimeout(() => {
+      if (this.destroyed) return
       this.notifications.info(`检测到 ${sessions.length} 个未正常关闭的 Agent 会话，正在恢复...`)
       this.restoreSessions()
     }, 2000)

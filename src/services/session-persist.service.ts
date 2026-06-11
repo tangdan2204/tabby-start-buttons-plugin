@@ -10,6 +10,16 @@ export interface SavedSession {
   savedAt: number
 }
 
+function isValidSession(s: any): s is SavedSession {
+  return s != null &&
+    typeof s === 'object' &&
+    typeof s.kind === 'string' &&
+    typeof s.cwd === 'string' &&
+    typeof s.title === 'string' &&
+    typeof s.savedAt === 'number' &&
+    isFinite(s.savedAt)
+}
+
 @Injectable({ providedIn: 'root' })
 export class SessionPersistService {
   private sessions: SavedSession[] = []
@@ -24,6 +34,7 @@ export class SessionPersistService {
       this.sessions[existing].savedAt = Date.now()
       this.sessions[existing].title = title
     } else {
+      if (this.sessions.length >= 50) return
       this.sessions.push({ kind, cwd, title, savedAt: Date.now() })
     }
     this.persist()
@@ -60,10 +71,12 @@ export class SessionPersistService {
         const parsed = JSON.parse(raw)
         if (Array.isArray(parsed)) {
           const cutoff = Date.now() - 24 * 60 * 60 * 1000
-          this.sessions = parsed.filter((s: any) => s.savedAt > cutoff)
+          this.sessions = parsed.filter((s: any) => isValidSession(s) && s.savedAt > cutoff)
         }
       }
-    } catch {}
+    } catch {
+      localStorage.removeItem(STORAGE_KEY)
+    }
     log(`SessionPersist: loaded ${this.sessions.length} recoverable sessions`)
   }
 }

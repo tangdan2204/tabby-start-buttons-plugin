@@ -1,4 +1,4 @@
-import { NgModule } from '@angular/core'
+import { NgModule, OnDestroy } from '@angular/core'
 import { TabbyCoreModule, CommandProvider } from 'tabby-core'
 import { AgentMuxCommandProvider } from './providers/command.provider'
 import { AgentHotkeyProvider } from './providers/hotkey.provider'
@@ -20,12 +20,17 @@ const { HotkeyProvider, ToolbarButtonProvider } = require('tabby-core')
     { provide: ToolbarButtonProvider, useClass: AgentMuxToolbarProvider, multi: true },
   ],
 })
-export default class TabbyAgentMuxModule {
+export default class TabbyAgentMuxModule implements OnDestroy {
   constructor(
     private commandProvider: AgentMuxCommandProvider,
     private toolbarProvider: AgentMuxToolbarProvider,
   ) {
     this.toolbarProvider.setCommandProvider(this.commandProvider)
-    log('TabbyAgentMuxModule instantiated - v0.8.1')
+    log('TabbyAgentMuxModule instantiated - v0.9.0')
+  }
+
+  ngOnDestroy(): void {
+    try { this.commandProvider.destroy() } catch {}
+    log('TabbyAgentMuxModule destroyed')
   }
 }

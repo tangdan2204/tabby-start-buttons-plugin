@@ -8,8 +8,11 @@ const FLUSH_INTERVAL = 2000
 let logEnabled = true
 let buffer: string[] = []
 let flushTimer: any = null
+let rotated = false
 
 function rotateIfNeeded(): void {
+  if (rotated) return
+  rotated = true
   try {
     const stat = fs.statSync(LOG_FILE)
     if (stat.size > MAX_LOG_SIZE) {
@@ -36,7 +39,7 @@ function scheduleFlush(): void {
   }, FLUSH_INTERVAL)
 }
 
-rotateIfNeeded()
+setTimeout(rotateIfNeeded, 0)
 
 export function log(msg: string): void {
   if (!logEnabled) return
