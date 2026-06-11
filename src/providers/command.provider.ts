@@ -266,9 +266,10 @@ export class AgentMuxCommandProvider extends CommandProvider {
     if ((this.appService as any).tabOpened$?.subscribe) {
       this.subscriptions.push(
         (this.appService as any).tabOpened$.subscribe((tab: any) => {
+          let waitRetries = 0
           const waitSession = () => {
             if (tab?.session) patchSessionWrite(tab)
-            else if (!tab?.destroyed) setTimeout(waitSession, 300)
+            else if (!tab?.destroyed && ++waitRetries < 15) setTimeout(waitSession, 300)
           }
           setTimeout(waitSession, 200)
         })
@@ -548,8 +549,9 @@ export class AgentMuxCommandProvider extends CommandProvider {
   }
 
   private injectScrollbackHistory(tab: any, scrollback: string, kind: string, cwd: string): void {
+    let retries = 0
     const waitForSession = () => {
-      if (tab.destroyed) return
+      if (tab.destroyed || ++retries > 15) return
       const session = tab.session
       if (!session?.emitOutput) {
         setTimeout(waitForSession, 300)
@@ -580,8 +582,9 @@ export class AgentMuxCommandProvider extends CommandProvider {
   }
 
   private attachScrollbackCapture(tab: any, kind: string, cwd: string): void {
+    let retries = 0
     const waitForSession = () => {
-      if (tab.destroyed) return
+      if (tab.destroyed || ++retries > 15) return
       if (tab.session?.output$?.subscribe) {
         const sub = tab.session.output$.subscribe((data: any) => {
           const text = typeof data === 'string' ? data : data?.toString?.() || ''
