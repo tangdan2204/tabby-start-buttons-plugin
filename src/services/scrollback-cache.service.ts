@@ -3,8 +3,10 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { log, logError } from '../utils/logger'
 
-const CACHE_DIR = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'tabby-agent-mux', 'scrollback')
-const MAX_LINES = 5000
+const BASE_CACHE_DIR = path.join(process.env.APPDATA || process.env.HOME || __dirname, 'tabby-agent-mux', 'scrollback')
+const INSTANCE_ID = process.pid.toString(36)
+const CACHE_DIR = path.join(BASE_CACHE_DIR, INSTANCE_ID)
+const MAX_LINES = 2000
 const FLUSH_INTERVAL = 3000
 const MAX_AGE_MS = 4 * 60 * 60 * 1000
 
@@ -13,24 +15,37 @@ interface CacheEntry {
   dirty: boolean
   filePath: string
   flushTimer: any
+  flushing: boolean
+  version: number
 }
 
 @Injectable({ providedIn: 'root' })
 export class ScrollbackCacheService {
   private caches = new Map<string, CacheEntry>()
+  private ready = false
 
   constructor() {
-    this.ensureDir()
-    this.pruneOld()
+    setTimeout(() => {
+      this.ensureDir()
+      this.pruneOld()
+      this.ready = true
+    }, 1000)
   }
 
   private ensureDir(): void {
     try {
-      if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true })
+      fs.mkdir(CACHE_DIR, { recursive: true }, () => {})
     } catch {}
   }
 
-  private sessionKey(kind: string, cwd: string): string {
+  private sessionKey(sessionId: string, kind: string, cwd: string): string {
+    const safeSessionId = sessionId.replace(/[^a-z0-9-]/gi, '_')
+    const safeKind = kind.replace(/[^a-z0-9-]/gi, '_')
+    const safeCwd = cwd.replace(/[\\/:*?"<>|]/g, '_').slice(-80)
+    return `${safeSessionId}_${safeKind}_${safeCwd}`
+  }
+
+  private legacySessionKey(kind: string, cwd: string): string {
     const safe = cwd.replace(/[\\/:*?"<>|]/g, '_').slice(-80)
     return `${kind}_${safe}`
   }
@@ -39,8 +54,8 @@ export class ScrollbackCacheService {
     return path.join(CACHE_DIR, key + '.scrollback')
   }
 
-  append(kind: string, cwd: string, data: string): void {
-    const key = this.sessionKey(kind, cwd)
+  append(sessionId: string, kind: string, cwd: string, data: string): void {
+    const key = this.sessionKey(sessionId, kind, cwd)
     let entry = this.caches.get(key)
 
     if (!entry) {
@@ -49,6 +64,8 @@ export class ScrollbackCacheService {
         dirty: false,
         filePath: this.filePath(key),
         flushTimer: null,
+        flushing: false,
+        version: 0,
       }
       this.caches.set(key, entry)
     }
@@ -58,14 +75,10 @@ export class ScrollbackCacheService {
     if (entry.lines.length > MAX_LINES) {
       entry.lines = entry.lines.slice(-MAX_LINES)
     }
+    entry.version++
     entry.dirty = true
 
-    if (!entry.flushTimer) {
-      entry.flushTimer = setTimeout(() => {
-        entry!.flushTimer = null
-        this.flushEntry(key)
-      }, FLUSH_INTERVAL)
-    }
+    this.scheduleFlush(key, FLUSH_INTERVAL)
   }
 
   flushAll(): void {
@@ -74,62 +87,119 @@ export class ScrollbackCacheService {
     }
   }
 
+  private scheduleFlush(key: string, delayMs: number): void {
+    const entry = this.caches.get(key)
+    if (!entry || entry.flushTimer) return
+    entry.flushTimer = setTimeout(() => {
+      entry.flushTimer = null
+      this.flushEntry(key)
+    }, delayMs)
+  }
+
   private flushEntry(key: string): void {
     const entry = this.caches.get(key)
-    if (!entry || !entry.dirty) return
+    if (!entry || !entry.dirty || entry.flushing) return
 
     try {
+      entry.flushing = true
+      const targetVersion = entry.version
       const content = entry.lines.join('\n')
-      fs.writeFileSync(entry.filePath, content, 'utf-8')
-      entry.dirty = false
+      fs.writeFile(entry.filePath, content, 'utf-8', (err) => {
+        const current = this.caches.get(key)
+        if (current !== entry) return
+        entry.flushing = false
+        if (err) {
+          entry.dirty = true
+          this.scheduleFlush(key, 1000)
+          logError('ScrollbackCache.flush', err)
+          return
+        }
+        if (entry.version === targetVersion) {
+          entry.dirty = false
+          return
+        }
+        entry.dirty = true
+        this.scheduleFlush(key, 100)
+      })
     } catch (e: any) {
+      entry.flushing = false
+      entry.dirty = true
+      this.scheduleFlush(key, 1000)
       logError('ScrollbackCache.flush', e)
     }
   }
 
-  recover(kind: string, cwd: string): string | null {
-    const key = this.sessionKey(kind, cwd)
-    const fp = this.filePath(key)
+  recover(sessionId: string, kind: string, cwd: string): string | null {
+    const filenames = [
+      this.sessionKey(sessionId, kind, cwd) + '.scrollback',
+      this.legacySessionKey(kind, cwd) + '.scrollback',
+    ]
 
     try {
-      if (fs.existsSync(fp)) {
-        const content = fs.readFileSync(fp, 'utf-8')
-        if (content.length > 0) {
-          log(`ScrollbackCache: recovered ${content.split('\n').length} lines for ${kind}@${cwd}`)
-          return content
+      if (!fs.existsSync(BASE_CACHE_DIR)) return null
+      const dirs = fs.readdirSync(BASE_CACHE_DIR)
+      for (const dir of dirs) {
+        for (const filename of filenames) {
+          const fp = path.join(BASE_CACHE_DIR, dir, filename)
+          try {
+            if (fs.existsSync(fp)) {
+              const claimPath = `${fp}.claim.${process.pid.toString(36)}.${Date.now().toString(36)}`
+              try {
+                fs.renameSync(fp, claimPath)
+              } catch {
+                // Another instance may have claimed this file.
+                continue
+              }
+              const content = fs.readFileSync(claimPath, 'utf-8')
+              if (content.length > 0) {
+                log(`ScrollbackCache: recovered ${content.split('\n').length} lines for ${kind}@${cwd}`)
+                fs.unlink(claimPath, () => {})
+                return content
+              }
+              fs.unlink(claimPath, () => {})
+            }
+          } catch {}
         }
       }
     } catch {}
     return null
   }
 
-  remove(kind: string, cwd: string): void {
-    const key = this.sessionKey(kind, cwd)
-    const entry = this.caches.get(key)
-    if (entry) {
-      if (entry.flushTimer) clearTimeout(entry.flushTimer)
-      this.caches.delete(key)
+  remove(sessionId: string, kind: string, cwd: string): void {
+    const keys = [
+      this.sessionKey(sessionId, kind, cwd),
+      this.legacySessionKey(kind, cwd),
+    ]
+
+    for (const key of keys) {
+      const entry = this.caches.get(key)
+      if (entry) {
+        if (entry.flushTimer) clearTimeout(entry.flushTimer)
+        this.caches.delete(key)
+      }
+      try {
+        const fp = this.filePath(key)
+        if (fs.existsSync(fp)) fs.unlinkSync(fp)
+      } catch {}
     }
-    try {
-      const fp = this.filePath(key)
-      if (fs.existsSync(fp)) fs.unlinkSync(fp)
-    } catch {}
   }
 
   private pruneOld(): void {
     try {
-      if (!fs.existsSync(CACHE_DIR)) return
-      const now = Date.now()
-      for (const file of fs.readdirSync(CACHE_DIR)) {
-        if (!file.endsWith('.scrollback')) continue
-        const fp = path.join(CACHE_DIR, file)
-        try {
-          const stat = fs.statSync(fp)
-          if (now - stat.mtimeMs > MAX_AGE_MS) {
-            fs.unlinkSync(fp)
-          }
-        } catch {}
-      }
+      fs.readdir(CACHE_DIR, (err, files) => {
+        if (err || !files) return
+        const now = Date.now()
+        for (const file of files) {
+          if (!file.endsWith('.scrollback') && !file.includes('.scrollback.claim.')) continue
+          const fp = path.join(CACHE_DIR, file)
+          fs.stat(fp, (err2, stat) => {
+            if (err2) return
+            if (now - stat.mtimeMs > MAX_AGE_MS) {
+              fs.unlink(fp, () => {})
+            }
+          })
+        }
+      })
     } catch {}
   }
 

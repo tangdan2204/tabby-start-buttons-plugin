@@ -13,6 +13,10 @@
     "dev": "webpack --mode development --watch",
     "deploy": "node scripts/deploy.js",
     "deploy:quick": "node scripts/deploy.js --skip-build",
+    "audit:guardrails": "node scripts/check-runtime-guardrails.js",
+    "audit:utf8": "node scripts/check-encoding-utf8.js",
+    "smoke:isolation": "node scripts/smoke-multi-instance-isolation.mjs",
+    "verify:industrial": "node scripts/check-runtime-guardrails.js && node scripts/check-encoding-utf8.js && node scripts/smoke-multi-instance-isolation.mjs && npm run build",
     "release": "npm version patch && npm run deploy",
     "release:minor": "npm version minor && npm run deploy"
   },

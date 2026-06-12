@@ -21,6 +21,8 @@ export class AgentMonitorService {
   private outputBuffers = new Map<any, string[]>()
   private analyzeTimers = new Map<any, any>()
 
+  private lastEmittedStatus = new Map<any, AgentStatus>()
+
   private patterns = {
     waiting: [
       /^\s*\?\s/,
@@ -70,15 +72,15 @@ export class AgentMonitorService {
 
     const lines = data.split('\n')
     buf.push(...lines)
-    if (buf.length > 200) {
-      this.outputBuffers.set(tab, buf.slice(-200))
+    if (buf.length > 100) {
+      this.outputBuffers.set(tab, buf.slice(-100))
     }
 
     if (!this.analyzeTimers.has(tab)) {
       this.analyzeTimers.set(tab, setTimeout(() => {
         this.analyzeTimers.delete(tab)
         this.analyzeAndUpdate(tab)
-      }, 300))
+      }, 500))
     }
   }
 
@@ -176,6 +178,7 @@ export class AgentMonitorService {
         detectedPorts,
       }
       this.states.set(tab, state)
+      this.lastEmittedStatus.set(tab, newStatus)
       this.states$.next(new Map(this.states))
       this.recalcUnread()
 
@@ -212,5 +215,13 @@ export class AgentMonitorService {
       if (state.unread) count++
     }
     this.unreadCount$.next(count)
+  }
+
+  destroy(): void {
+    for (const timer of this.analyzeTimers.values()) clearTimeout(timer)
+    this.analyzeTimers.clear()
+    this.states.clear()
+    this.outputBuffers.clear()
+    this.lastEmittedStatus.clear()
   }
 }

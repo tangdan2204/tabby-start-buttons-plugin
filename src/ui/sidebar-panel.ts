@@ -3,6 +3,9 @@ import * as path from 'path'
 import { Subscription } from 'rxjs'
 import { AgentMonitorService, AgentState } from '../services/agent-monitor.service'
 import { TabMetadataService, TabMetadata } from '../services/tab-metadata.service'
+import { LaunchService } from '../services/launch.service'
+import { SessionPersistService } from '../services/session-persist.service'
+import { EventBusService } from '../services/event-bus.service'
 import { log, logError } from '../utils/logger'
 
 const PANEL_ID = 'agent-mux-sidebar'
@@ -72,7 +75,7 @@ const SIDEBAR_CSS = `
   }
   #${PANEL_ID} .agent-item:hover { background: var(--theme-bg-hover, #313244); }
   #${PANEL_ID} .agent-item:focus-visible { outline: 2px solid #6366f1; outline-offset: -2px; }
-  #${PANEL_ID} .agent-item.active { border-left-color: #6366f1; background: #1e1b4b33; }
+  #${PANEL_ID} .agent-item.active { border-left-color: rgb(215, 119, 87); background: rgba(215, 119, 87, 0.12); }
   #${PANEL_ID} .agent-item .agent-top {
     display: flex;
     align-items: center;
@@ -138,25 +141,18 @@ const SIDEBAR_CSS = `
   #${PANEL_ID} .history-item .kind-badge.codex { background: #0ea5e933; color: #38bdf8; }
   #${PANEL_ID} .history-item .kind-badge.claude { background: #f59e0b33; color: #f59e0b; }
 
-  body.agent-mux-sidebar-active .tab-body,
-  body.agent-mux-sidebar-active main-content,
-  body.agent-mux-sidebar-active .content {
-    margin-left: 260px;
-  }
-
   @media (max-width: 768px) {
     #${PANEL_ID} { width: 200px; }
-    body.agent-mux-sidebar-active .tab-body,
-    body.agent-mux-sidebar-active main-content,
-    body.agent-mux-sidebar-active .content { margin-left: 200px; }
   }
 `
 
 export class SidebarPanel {
-  private commandProvider: any
   private appService: any
   private agentMonitor: AgentMonitorService
   private tabMetadata: TabMetadataService | null = null
+  private launchService: LaunchService
+  private sessionPersist: SessionPersistService
+  private eventBus: EventBusService
   private panel: HTMLElement | null = null
   private agentListEl: HTMLElement | null = null
   private historyEl: HTMLElement | null = null
@@ -167,14 +163,22 @@ export class SidebarPanel {
   private renderDebounce: any = null
   private cachedDirEntries: string[] | null = null
   private dirLoadGeneration = 0
-  onPortClick: ((port: number) => void) | null = null
 
-  constructor(commandProvider: any, appService: any, agentMonitor: AgentMonitorService, tabMetadata?: TabMetadataService) {
-    this.commandProvider = commandProvider
+  constructor(
+    appService: any,
+    agentMonitor: AgentMonitorService,
+    tabMetadata: TabMetadataService,
+    launchService: LaunchService,
+    sessionPersist: SessionPersistService,
+    eventBus: EventBusService,
+  ) {
     this.appService = appService
     this.agentMonitor = agentMonitor
-    this.tabMetadata = tabMetadata || null
-    this.rootDir = commandProvider.getLastProjectCwd?.() || ''
+    this.tabMetadata = tabMetadata
+    this.launchService = launchService
+    this.sessionPersist = sessionPersist
+    this.eventBus = eventBus
+    this.rootDir = launchService.getLastProjectCwd()
   }
 
   init(): void {
@@ -192,7 +196,7 @@ export class SidebarPanel {
     this.visible = !this.visible
     if (this.panel) this.panel.classList.toggle('hidden', !this.visible)
     this.adjustMainContent()
-    this.notifyLayoutChange()
+    this.eventBus.emitLayoutChange({ sidebar: this.visible })
   }
 
   isVisible(): boolean { return this.visible }
@@ -218,12 +222,6 @@ export class SidebarPanel {
   private syncTabBarHeight(): void {
     const h = getTabBarHeight()
     document.documentElement.style.setProperty('--agent-mux-tab-bar-h', h)
-  }
-
-  private notifyLayoutChange(): void {
-    window.dispatchEvent(new CustomEvent('agent-mux-layout-change', {
-      detail: { sidebar: this.visible }
-    }))
   }
 
   private injectStyles(): void {
@@ -274,7 +272,7 @@ export class SidebarPanel {
       if (portBtn) {
         e.stopPropagation()
         const port = portBtn.dataset.port
-        if (port && this.onPortClick) this.onPortClick(parseInt(port, 10))
+        if (port) this.eventBus.emitPortClick({ port: parseInt(port, 10) })
         return
       }
 
@@ -291,7 +289,7 @@ export class SidebarPanel {
       const dirItem = target.closest('.dir-item') as HTMLElement
       if (dirItem) {
         const dir = dirItem.dataset.dir || ''
-        if (dir) this.commandProvider.launchInDir?.('claude', dir)
+        if (dir) this.launchService.launchInDir('claude', dir)
         return
       }
 
@@ -299,7 +297,7 @@ export class SidebarPanel {
       if (historyItem) {
         const kind = historyItem.dataset.kind || 'claude'
         const cwd = historyItem.dataset.cwd || ''
-        if (cwd) this.commandProvider.launchInDir?.(kind, cwd)
+        if (cwd) this.launchService.launchInDir(kind, cwd)
         return
       }
 
@@ -312,7 +310,7 @@ export class SidebarPanel {
 
       const restoreBtn = target.closest('[data-action="restore-all"]') as HTMLElement
       if (restoreBtn) {
-        this.commandProvider.restoreSessions?.()
+        this.eventBus.emitLaunchRequest({ kind: 'shell' })
         return
       }
     })
@@ -336,10 +334,11 @@ export class SidebarPanel {
 
   private scheduleRender(): void {
     if (this.renderDebounce) return
+    if (!this.visible) return
     this.renderDebounce = setTimeout(() => {
       this.renderDebounce = null
-      this.render()
-    }, 100)
+      if (this.visible) this.render()
+    }, 300)
   }
 
   private render(): void {
@@ -442,12 +441,11 @@ export class SidebarPanel {
   }
 
   private renderHistory(): string {
-    const history = this.commandProvider.getLoadHistory?.() || []
+    const history = this.launchService.getHistory()
 
     let recoverHtml = ''
-    const persistService = this.commandProvider.getSessionPersist?.()
-    if (persistService?.hasRecoverable?.()) {
-      const sessions = persistService.getAll()
+    if (this.sessionPersist.hasRecoverable()) {
+      const sessions = this.sessionPersist.getRecoverable()
       recoverHtml = `<div class="panel-header"><span>恢复会话 (${sessions.length})</span><button data-action="restore-all" aria-label="恢复所有会话" style="font-size:10px;">全部恢复</button></div>`
       recoverHtml += sessions.map((s: any) => {
         const name = s.cwd.split(/[\\/]/).pop() || s.cwd

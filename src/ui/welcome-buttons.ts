@@ -1,4 +1,6 @@
 import { log } from '../utils/logger'
+import { EventBusService } from '../services/event-bus.service'
+import { SessionPersistService } from '../services/session-persist.service'
 
 const WELCOME_CSS_ID = 'agent-mux-welcome-css'
 const CONTAINER_ID = 'agent-mux-welcome'
@@ -56,7 +58,8 @@ const WELCOME_CSS = `
 `
 
 export class WelcomeButtons {
-  private commandProvider: any
+  private eventBus: EventBusService
+  private sessionPersist: SessionPersistService
   private injected = false
   private observer: MutationObserver | null = null
   private retryTimer: any = null
@@ -65,10 +68,11 @@ export class WelcomeButtons {
   private navigationObserver: MutationObserver | null = null
   private navDebounce: any = null
   private totalReinjections = 0
-  private maxTotalReinjections = 20
+  private maxTotalReinjections = 5
 
-  constructor(commandProvider: any) {
-    this.commandProvider = commandProvider
+  constructor(eventBus: EventBusService, sessionPersist: SessionPersistService) {
+    this.eventBus = eventBus
+    this.sessionPersist = sessionPersist
   }
 
   init(): void {
@@ -129,7 +133,7 @@ export class WelcomeButtons {
       }
     })
     const target = document.querySelector('app-root') || document.body
-    this.observer.observe(target, { childList: true, subtree: true })
+    this.observer.observe(target, { childList: true, subtree: false })
   }
 
   private scheduleRetry(): void {
@@ -207,7 +211,7 @@ export class WelcomeButtons {
     container.setAttribute('role', 'group')
     container.setAttribute('aria-label', 'AI CLI 启动')
 
-    const hasRecoverable = this.commandProvider.getSessionPersist?.()?.hasRecoverable?.()
+    const hasRecoverable = this.sessionPersist.hasRecoverable()
     const restoreBtn = hasRecoverable
       ? '<button class="welcome-btn restore" data-action="restore" aria-label="恢复上次会话">↺ 恢复会话</button>'
       : ''
@@ -225,9 +229,9 @@ export class WelcomeButtons {
       const btn = (e.target as HTMLElement).closest('[data-action]') as HTMLElement
       if (!btn) return
       const action = btn.dataset.action
-      if (action === 'codex') this.commandProvider.launchKind?.('codex')
-      else if (action === 'claude') this.commandProvider.launchKind?.('claude')
-      else if (action === 'restore') this.commandProvider.restoreSessions?.()
+      if (action === 'codex') this.eventBus.emitLaunchRequest({ kind: 'codex' })
+      else if (action === 'claude') this.eventBus.emitLaunchRequest({ kind: 'claude' })
+      else if (action === 'restore') this.eventBus.emitLaunchRequest({ kind: 'shell' })
     })
 
     let inserted = false

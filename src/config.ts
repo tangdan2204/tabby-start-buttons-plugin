@@ -1,3 +1,4 @@
+import { Injectable } from '@angular/core'
 import * as fs from 'fs'
 import * as path from 'path'
 import { log } from './utils/logger'
@@ -101,87 +102,122 @@ function getDefaultProjectDir(): string {
   return process.env.USERPROFILE || 'C:\\'
 }
 
-let _config: PluginConfig | null = null
-let _commandsResolved = false
+@Injectable({ providedIn: 'root' })
+export class ConfigService {
+  private config: PluginConfig
+  private commandsResolved = false
 
-export function getConfig(): PluginConfig {
-  if (_config) return _config
-
-  _config = {
-    defaultProjectDir: getDefaultProjectDir(),
-    nodeHome: null,
-    codexCmd: null,
-    npxCmd: null,
-    notifications: {
-      sound: false,
-      osBanner: true,
-      glowEnabled: true,
-    },
-    sidebar: {
-      mode: 'agents',
-      width: 260,
-      visible: true,
-    },
-    teams: { presets: [] },
-    browser: {
-      defaultWidth: 40,
-      position: 'right',
-    },
+  constructor() {
+    this.config = {
+      defaultProjectDir: getDefaultProjectDir(),
+      nodeHome: null,
+      codexCmd: null,
+      npxCmd: null,
+      notifications: {
+        sound: false,
+        osBanner: true,
+        glowEnabled: true,
+      },
+      sidebar: {
+        mode: 'agents',
+        width: 260,
+        visible: true,
+      },
+      teams: { presets: [] },
+      browser: {
+        defaultWidth: 40,
+        position: 'right',
+      },
+    }
+    setTimeout(() => this.resolveCommands(), 0)
   }
 
-  setTimeout(() => resolveCommands(), 0)
-  return _config
+  get(): PluginConfig {
+    return this.config
+  }
+
+  ensureCommandsResolved(): void {
+    this.resolveCommands()
+  }
+
+  makeLocalProfile(idSuffix: string, name: string, command: string, args: string[], cwd: string) {
+    return {
+      id: `local:custom:tabby-agent-mux:${idSuffix}`,
+      type: 'local',
+      name,
+      icon: 'fas fa-terminal',
+      disableDynamicTitle: true,
+      options: {
+        restoreFromPTYID: null,
+        command,
+        args,
+        cwd,
+        env: { LANG: 'zh_CN.UTF-8', LC_ALL: 'zh_CN.UTF-8' },
+        width: null,
+        height: null,
+        pauseAfterExit: true,
+        runAsAdministrator: false,
+      },
+    }
+  }
+
+  makeCodexProfile(cwd: string) {
+    this.ensureCommandsResolved()
+    return this.makeLocalProfile('codex', path.basename(cwd), this.config.codexCmd || 'codex.cmd', [], cwd)
+  }
+
+  makeClaudeProfile(cwd: string) {
+    this.ensureCommandsResolved()
+    const claudeCmd = resolveCommand('claude', '.cmd')
+    return this.makeLocalProfile('claude', path.basename(cwd), claudeCmd, [], cwd)
+  }
+
+  makeShellProfile(cwd: string) {
+    return this.makeLocalProfile('shell', path.basename(cwd), 'powershell.exe', ['-NoLogo'], cwd)
+  }
+
+  private resolveCommands(): void {
+    if (this.commandsResolved) return
+    this.commandsResolved = true
+
+    const codexCmd = resolveCommand('codex', '.cmd')
+    const npxCmd = resolveCommand('npx', '.cmd')
+    this.config.codexCmd = codexCmd
+    this.config.npxCmd = npxCmd
+    this.config.nodeHome = npxCmd ? path.dirname(npxCmd) : null
+    log(`Config resolved: codex=${codexCmd}, npx=${npxCmd}, projectDir=${this.config.defaultProjectDir}`)
+  }
 }
 
-function resolveCommands(): void {
-  if (_commandsResolved || !_config) return
-  _commandsResolved = true
+// Backward-compatible exports for existing code during migration
+let _legacyInstance: ConfigService | null = null
 
-  const codexCmd = resolveCommand('codex', '.cmd')
-  const npxCmd = resolveCommand('npx', '.cmd')
-  _config.codexCmd = codexCmd
-  _config.npxCmd = npxCmd
-  _config.nodeHome = npxCmd ? path.dirname(npxCmd) : null
-  log(`Config resolved: codex=${codexCmd}, npx=${npxCmd}, projectDir=${_config.defaultProjectDir}`)
+export function getConfig(): PluginConfig {
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  return _legacyInstance.get()
 }
 
 export function ensureCommandsResolved(): void {
-  resolveCommands()
-}
-
-export function makeLocalProfile(idSuffix: string, name: string, command: string, args: string[], cwd: string) {
-  return {
-    id: `local:custom:tabby-agent-mux:${idSuffix}`,
-    type: 'local',
-    name,
-    icon: 'fas fa-terminal',
-    disableDynamicTitle: true,
-    options: {
-      restoreFromPTYID: null,
-      command,
-      args,
-      cwd,
-      env: { LANG: 'zh_CN.UTF-8', LC_ALL: 'zh_CN.UTF-8' },
-      width: null,
-      height: null,
-      pauseAfterExit: true,
-      runAsAdministrator: false,
-    },
-  }
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  _legacyInstance.ensureCommandsResolved()
 }
 
 export function makeCodexProfile(cwd: string) {
-  ensureCommandsResolved()
-  const cfg = getConfig()
-  return makeLocalProfile('codex', path.basename(cwd), cfg.codexCmd || 'codex.cmd', [], cwd)
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  return _legacyInstance.makeCodexProfile(cwd)
 }
 
 export function makeClaudeProfile(cwd: string) {
-  ensureCommandsResolved()
-  const cfg = getConfig()
-  return makeLocalProfile('claude', path.basename(cwd), cfg.npxCmd || 'npx.cmd', ['-y', '@anthropic-ai/claude-code'], cwd)
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  return _legacyInstance.makeClaudeProfile(cwd)
 }
 
 export function makeShellProfile(cwd: string) {
-  return makeLocalProfile('shell', path.basename(cwd), 'powershell.exe', ['-NoLogo'], cwd)
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  return _legacyInstance.makeShellProfile(cwd)
+}
+
+export function makeLocalProfile(idSuffix: string, name: string, command: string, args: string[], cwd: string) {
+  if (!_legacyInstance) _legacyInstance = new ConfigService()
+  return _legacyInstance.makeLocalProfile(idSuffix, name, command, args, cwd)
 }

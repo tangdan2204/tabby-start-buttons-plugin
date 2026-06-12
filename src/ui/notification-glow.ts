@@ -40,6 +40,13 @@ const GLOW_CSS = `
     opacity: 1 !important;
   }
 
+  tab-header.active {
+    background: rgba(215, 119, 87, 0.15) !important;
+  }
+  tab-header.active .current-tab-indicator {
+    background: rgb(215, 119, 87) !important;
+  }
+
   .agent-badge {
     position: fixed;
     top: 6px;
@@ -223,7 +230,7 @@ export class NotificationGlow {
     this.glowDebounce = setTimeout(() => {
       this.glowDebounce = null
       this.updateTabGlows()
-    }, 200)
+    }, 300)
   }
 
   private updateTabGlows(): void {
@@ -240,6 +247,8 @@ export class NotificationGlow {
       if (!state || state.status === 'idle') continue
       header.classList.add(`agent-${state.status}`)
     }
+
+    if (!this.observer) this.watchTabHeaders()
   }
 
   private rebuildHeaderMap(tabs: any[]): void {
@@ -247,27 +256,17 @@ export class NotificationGlow {
     if (headers.length === 0) return
 
     for (let i = 0; i < tabs.length && i < headers.length; i++) {
-      const tab = tabs[i]
-      const header = headers[i] as HTMLElement
-
-      const tabTitle = (tab.customTitle || tab.title || '').trim().toLowerCase()
-      const headerTitle = (header.querySelector('.name')?.textContent || '').trim().toLowerCase()
-
-      if (tabTitle && headerTitle && tabTitle === headerTitle) {
-        this.tabHeaderMap.set(tab, header)
-      } else {
-        this.tabHeaderMap.set(tab, header)
-      }
+      this.tabHeaderMap.set(tabs[i], headers[i] as HTMLElement)
     }
   }
 
   private watchTabHeaders(): void {
-    this.observer = new MutationObserver(() => {
-      this.scheduleGlowUpdate()
-    })
     const tabsContainer = document.querySelector('.tabs')?.parentElement
       || document.querySelector('tab-header')?.parentElement
     if (!tabsContainer || tabsContainer === document.body) return
+    this.observer = new MutationObserver(() => {
+      this.scheduleGlowUpdate()
+    })
     this.observer.observe(tabsContainer, { childList: true, subtree: false })
   }
 }

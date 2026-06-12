@@ -1,7 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 
-const LOG_FILE = path.join(__dirname, '..', 'debug.log')
+const LOG_FILE = path.join(__dirname, '..', `debug-${process.pid.toString(36)}.log`)
 const MAX_LOG_SIZE = 512 * 1024
 const FLUSH_INTERVAL = 2000
 

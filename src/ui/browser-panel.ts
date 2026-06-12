@@ -1,4 +1,5 @@
 import { log, logError } from '../utils/logger'
+import { EventBusService } from '../services/event-bus.service'
 
 const BROWSER_PANEL_ID = 'agent-mux-browser'
 const BROWSER_CSS_ID = 'agent-mux-browser-css'
@@ -9,7 +10,7 @@ const BROWSER_CSS = `
     top: var(--agent-mux-tab-bar-h, 38px);
     right: 0;
     bottom: 0;
-    width: 40%;
+    width: var(--agent-mux-browser-width, 40%);
     min-width: 320px;
     background: var(--theme-bg, #1a1a2e);
     border-left: 1px solid var(--theme-border, #313244);
@@ -92,11 +93,6 @@ const BROWSER_CSS = `
     z-index: 1;
   }
   #${BROWSER_PANEL_ID} .resize-handle:hover { background: rgba(99,102,241,0.3); }
-
-  body.agent-mux-browser-active .tab-body,
-  body.agent-mux-browser-active main-content {
-    margin-right: 40%;
-  }
 `
 
 export class BrowserPanel {
@@ -108,9 +104,16 @@ export class BrowserPanel {
   private currentUrl = ''
   private resizeCleanup: (() => void) | null = null
   private onVisibilityChange: (() => void) | null = null
+  private eventBus: EventBusService | null = null
+
+  constructor(eventBus?: EventBusService) {
+    this.eventBus = eventBus || null
+  }
 
   init(): void {
     if (typeof document === 'undefined') return
+    this.resetStaleLayoutState()
+    this.ensureWidthVar()
     this.injectStyles()
     log('BrowserPanel initialized (lazy)')
   }
@@ -119,7 +122,6 @@ export class BrowserPanel {
     if (!this.panel) this.createPanel()
     this.visible = !this.visible
     this.panel!.classList.toggle('hidden', !this.visible)
-    document.body.classList.toggle('agent-mux-browser-active', this.visible)
     this.notifyLayoutChange()
   }
 
@@ -127,7 +129,6 @@ export class BrowserPanel {
     if (!this.panel) this.createPanel()
     this.visible = true
     this.panel!.classList.remove('hidden')
-    document.body.classList.add('agent-mux-browser-active')
     if (url) this.navigate(url)
     this.notifyLayoutChange()
   }
@@ -135,7 +136,6 @@ export class BrowserPanel {
   close(): void {
     this.visible = false
     if (this.panel) this.panel.classList.add('hidden')
-    document.body.classList.remove('agent-mux-browser-active')
     this.notifyLayoutChange()
   }
 
@@ -167,13 +167,33 @@ export class BrowserPanel {
     this.panel?.remove()
     this.panel = null
     document.getElementById(BROWSER_CSS_ID)?.remove()
-    document.body.classList.remove('agent-mux-browser-active')
+    this.resetStaleLayoutState()
   }
 
   private notifyLayoutChange(): void {
+    if (this.eventBus) {
+      this.eventBus.emitLayoutChange({ browser: this.visible })
+      return
+    }
     window.dispatchEvent(new CustomEvent('agent-mux-layout-change', {
       detail: { browser: this.visible }
     }))
+  }
+
+  private ensureWidthVar(): void {
+    const root = document.documentElement
+    const current = root.style.getPropertyValue('--agent-mux-browser-width').trim()
+    if (!current) root.style.setProperty('--agent-mux-browser-width', '40%')
+  }
+
+  private resetStaleLayoutState(): void {
+    document.body.classList.remove('agent-mux-browser-active')
+    const existing = document.getElementById(BROWSER_PANEL_ID) as HTMLElement | null
+    if (existing) existing.classList.add('hidden')
+    for (const node of Array.from(document.querySelectorAll('.tab-body, main-content'))) {
+      const el = node as HTMLElement
+      if (el.style && el.style.marginRight) el.style.marginRight = ''
+    }
   }
 
   private injectStyles(): void {
@@ -214,6 +234,7 @@ export class BrowserPanel {
     `
 
     document.body.appendChild(this.panel)
+    this.ensureWidthVar()
 
     this.urlInput = this.panel.querySelector('.browser-url')
     this.contentArea = this.panel.querySelector('.browser-content')
@@ -293,6 +314,7 @@ export class BrowserPanel {
       const newWidth = startWidth + diff
       if (this.panel && newWidth >= 320 && newWidth <= window.innerWidth * 0.8) {
         this.panel.style.width = newWidth + 'px'
+        document.documentElement.style.setProperty('--agent-mux-browser-width', newWidth + 'px')
       }
     }
 

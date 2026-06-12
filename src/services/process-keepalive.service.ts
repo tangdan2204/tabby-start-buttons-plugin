@@ -1,8 +1,15 @@
+import { Injectable } from '@angular/core'
 import { log } from '../utils/logger'
 
-export class ProcessKeepAlive {
+@Injectable({ providedIn: 'root' })
+export class ProcessKeepAliveService {
   private watchedTabs = new Map<any, { kind: string; cwd: string; onRestart: () => void }>()
   private outputSubs = new WeakMap<any, any>()
+  private readonly exitMarkers = [
+    /press any key to close/i,
+    /press any key to continue/i,
+    /按任意键/i,
+  ]
 
   watch(tab: any, kind: string, cwd: string, onRestart: () => void): void {
     if (this.watchedTabs.has(tab)) return
@@ -20,8 +27,9 @@ export class ProcessKeepAlive {
   }
 
   private attachExitDetector(tab: any): void {
+    let retries = 0
     const waitForSession = () => {
-      if (!tab || tab.destroyed) return
+      if (!tab || tab.destroyed || ++retries > 15) return
       const session = tab.session
       if (!session?.output$?.subscribe) {
         setTimeout(waitForSession, 500)
@@ -30,7 +38,7 @@ export class ProcessKeepAlive {
 
       const sub = session.output$.subscribe((data: any) => {
         const text = typeof data === 'string' ? data : data?.toString?.() || ''
-        if (text.includes('Press any key to close')) {
+        if (this.exitMarkers.some(marker => marker.test(text))) {
           sub.unsubscribe()
           this.outputSubs.delete(tab)
           this.handleProcessExit(tab)
@@ -85,6 +93,10 @@ export class ProcessKeepAlive {
   }
 
   destroy(): void {
+    for (const [tab] of this.watchedTabs) {
+      const sub = this.outputSubs.get(tab)
+      if (sub) { try { sub.unsubscribe() } catch {} }
+    }
     this.watchedTabs.clear()
   }
 }
